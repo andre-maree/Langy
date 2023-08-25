@@ -42,48 +42,6 @@ namespace Langy
 
             MetaData metas = await context.CallActivityAsync<MetaData>(nameof(GetMetaData), true);
 
-            //var re = from a in metas.Keys
-            //         group a by a.Usage.Distinct() into g
-            //         select new
-            //         {
-            //             Key = g.Key,
-            //             Value = g.Select(r=>r.Usage).ToArray()
-            //         };
-
-            //List<(string key, List<string> usage)> l = new();
-            //HashSet<string> locs = new();
-
-            //foreach (var key in metas.Keys)
-            //{
-            //    foreach (var loc in key.Usage)
-            //    {
-            //        locs.Add(loc);
-            //    }
-            //}
-
-            //List<Keys> res = new();
-
-            //foreach (var loc in locs)
-            //{
-            //    var keys = new Keys()
-            //    {
-            //        Key = loc,
-            //        Usage = new List<string>()
-            //    };
-
-            //    foreach (var key in metas.Keys)
-            //    {
-            //        List<string> values = new();
-
-            //        if (key.Usage.Contains(loc))
-            //        {
-            //            keys.Usage.Add(key.Key);
-            //        }
-            //    }
-
-            //    res.Add(keys);
-            //}
-
             outputs.AddRange(metas.Codes);
 
             await context.CallActivityAsync(nameof(Process), metas);
