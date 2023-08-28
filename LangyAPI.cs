@@ -24,12 +24,12 @@ namespace Langy
         {
             GroupObject group = await req.Content.ReadAsAsync<GroupObject>();
 
-            var serviceClient = new TableServiceClient(Environment.GetEnvironmentVariable("AzureWebJobsStorage"));
+            TableServiceClient serviceClient = new(Environment.GetEnvironmentVariable("AzureWebJobsStorage"));
             TableClient table = serviceClient.GetTableClient("Langy");
 
             table.CreateIfNotExists();
 
-            var tableEntity = new TableEntity("Usage", HttpUtility.UrlEncodeUnicode(group.Group)) {
+            TableEntity tableEntity = new("Usage", HttpUtility.UrlEncodeUnicode(group.Group)) {
                 {
                     "Usage",
                     JsonConvert.SerializeObject(group.Keys)
@@ -45,14 +45,14 @@ namespace Langy
         public static async Task<HttpResponseMessage> SaveLanguage(
         [HttpTrigger(AuthorizationLevel.System, Route = "SaveLanguage")] HttpRequestMessage req)
         {
-            var serviceClient = new TableServiceClient(Environment.GetEnvironmentVariable("AzureWebJobsStorage"));
+            TableServiceClient serviceClient = new(Environment.GetEnvironmentVariable("AzureWebJobsStorage"));
             TableClient table = serviceClient.GetTableClient("Langy");
 
             table.CreateIfNotExists();
 
             Dictionary<string, string> dyna = await req.Content.ReadAsAsync<Dictionary<string, string>>();
 
-            var tableEntity = new TableEntity("Langy", dyna["Code"])
+            TableEntity tableEntity = new("Langy", dyna["Code"])
                 {
                     {
                         "Language",
@@ -69,7 +69,7 @@ namespace Langy
         public static async Task<HttpResponseMessage> DeleteLanguage(
         [HttpTrigger(AuthorizationLevel.System, Route = "DeleteLanguage")] HttpRequestMessage req)
         {
-            var serviceClient = new TableServiceClient(Environment.GetEnvironmentVariable("AzureWebJobsStorage"));
+            TableServiceClient serviceClient = new(Environment.GetEnvironmentVariable("AzureWebJobsStorage"));
             TableClient table = serviceClient.GetTableClient("Langy");
 
             table.CreateIfNotExists();
@@ -85,16 +85,16 @@ namespace Langy
         public static async Task<HttpResponseMessage> SaveLanguageItem(
         [HttpTrigger(AuthorizationLevel.System, Route = "SaveLanguageItem")] HttpRequestMessage req)
         {
-            var serviceClient = new TableServiceClient(Environment.GetEnvironmentVariable("AzureWebJobsStorage"));
+            TableServiceClient serviceClient = new(Environment.GetEnvironmentVariable("AzureWebJobsStorage"));
             TableClient table = serviceClient.GetTableClient("Langy");
 
-            var langtask = GetLanguagesAsync(table);
+            Task<Dictionary<string, string>> langtask = GetLanguagesAsync(table);
 
             string uid = Regex.Replace(Convert.ToBase64String(Guid.NewGuid().ToByteArray()), "[/+=]", "");
 
             Dictionary<string, string> data = await req.Content.ReadAsAsync<Dictionary<string, string>>();
             List<string> fails = new();
-            List<Task> tasks = new();
+            List<Task<Response>> tasks = new();
 
             await langtask;
 
@@ -104,11 +104,11 @@ namespace Langy
             {
                 return new HttpResponseMessage(HttpStatusCode.BadRequest)
                 {
-                    Content = new StringContent($"The input count does not match the saved language code counts.")
+                    Content = new StringContent($"The input count does not match the saved language code count.")
                 };
             }
 
-            foreach (var lang in langs)
+            foreach (KeyValuePair<string, string> lang in langs)
             {
                 if (!data.ContainsKey(lang.Key))
                 {
@@ -119,10 +119,10 @@ namespace Langy
                 }
             }
 
-            foreach (var kvp in data)
+            foreach (KeyValuePair<string, string> kvp in data)
             {
                 string rk = HttpUtility.UrlEncodeUnicode(kvp.Value);
-                var tableEntity = new TableEntity();
+                TableEntity tableEntity = new();
 
                 if (rk.Length > 512)
                 {
@@ -135,17 +135,32 @@ namespace Langy
                 tableEntity.RowKey = rk;
                 tableEntity.Add("Key", uid);
 
-                if (tasks.Count < 15)
-                {
+                //if (tasks.Count < 15)
+                //{
                     tasks.Add(table.AddEntityAsync(tableEntity));
-                }
-                else
-                {
-                    Task task = null;
+                //}
+                //else
+                //{
+                    Task<Response> task = null;
 
                     try
                     {
-                        task = await Task.WhenAny(tasks);
+                        task = await Task<Response>.WhenAny(tasks);
+
+                    if(task.IsFaulted)
+                    {
+                        if (task.Exception.GetBaseException() is RequestFailedException rfex && rfex.Status == 409)
+                        {
+                            //task.Exception.
+
+                            tableEntity.RowKey = uid;
+                            tableEntity.Add("Duplicate", true);
+                            tableEntity["Key"] = rk;
+
+                            tasks.Remove(task); 
+                            tasks.Add(table.AddEntityAsync(tableEntity));
+                        }
+                    }
 
                         tasks.Remove(task);
 
@@ -155,9 +170,11 @@ namespace Langy
                     {
                         if (ex.Status == 409)
                         {
-                            fails.Add(kvp.Key);
+                            tableEntity.RowKey = uid;
+                            tableEntity.Add("Duplicate", true);
+                            tableEntity["Key"] = rk;
 
-                            tasks.Remove(task);
+                            task.Start();
                         }
                         else if (ex.Status == 404)
                         {
@@ -169,33 +186,35 @@ namespace Langy
                         }
                     }
                 }
-            }
+            //}
+
+            Task task2;
 
             try
             {
-                await Task.WhenAll(tasks);
+                task2 = await Task.WhenAny(tasks);
             }
             catch (RequestFailedException ex)
             {
                 if (ex.Status == 409)
                 {
-                    foreach (var task in tasks.Where(t => !t.IsCompletedSuccessfully))
-                    {
-                        fails.Add(task.Id.ToString());
-                    }
+                    //foreach (Task task in tasks.Where(t => !t.IsCompletedSuccessfully))
+                    //{
+                    //    fails.Add(task.Id.ToString());
+                    //}
                 }
                 else if (ex.Status == 404)
                 {
                     await table.CreateIfNotExistsAsync();
 
-                    List<Task> tt = tasks;
+                    //List<Task> tt = tasks;
 
                     tasks.Clear();
 
-                    foreach (var task in tt)
-                    {
-                        task.Start();
-                    }
+                    //foreach (Task task in tt)
+                    //{
+                    //    task.Start();
+                    //}
                 }
             }
 
@@ -211,15 +230,15 @@ namespace Langy
         }
 
         [FunctionName("GetLanguageItem")]
-        public static async Task<HttpResponseMessage> CounterList(
+        public static async Task<HttpResponseMessage> GetLanguageItem(
                 [HttpTrigger(AuthorizationLevel.Function, Route = "GetLanguageItem/{code}")] HttpRequestMessage req, string code)
         {
-            var serviceClient = new TableServiceClient(Environment.GetEnvironmentVariable("AzureWebJobsStorage"));
+            TableServiceClient serviceClient = new(Environment.GetEnvironmentVariable("AzureWebJobsStorage"));
             TableClient table = serviceClient.GetTableClient("Langy");
 
             string text = await req.Content.ReadAsStringAsync();
 
-            var result = await table.GetEntityAsync<TableEntity>(code, HttpUtility.UrlEncode(text));
+            Response<TableEntity> result = await table.GetEntityAsync<TableEntity>(code, HttpUtility.UrlEncode(text));
 
             return new HttpResponseMessage(HttpStatusCode.OK)
             {
@@ -227,11 +246,51 @@ namespace Langy
             };
         }
 
+        [FunctionName("GetLanguageItems")]
+        public static async Task<HttpResponseMessage> GetLanguageItems(
+                [HttpTrigger(AuthorizationLevel.Function, Route = "GetLanguageItems/{code?}")] HttpRequestMessage req, string code)
+        {
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(JsonConvert.SerializeObject(await GetLanguageItemsAsync(code)))
+            };
+        }
+
+        private static async Task<Dictionary<string, string>> GetLanguageItemsAsync(string code)
+        {
+            TableServiceClient serviceClient = new(Environment.GetEnvironmentVariable("AzureWebJobsStorage"));
+            TableClient table = serviceClient.GetTableClient("Langy");
+            Dictionary<string, string> data = new();
+
+            if (code == null)
+            {
+                code = await GetTopOneLanguage(table);
+
+                AsyncPageable<TableEntity> queryResultsFilter = table.QueryAsync<TableEntity>(filter: $"PartitionKey eq '{code}'", select: new List<string> { "Key" });
+                
+                await foreach (TableEntity qEntity in queryResultsFilter)
+                {
+                    data.Add(qEntity.GetString("Key"), string.Empty);
+                }
+            }
+            else
+            {
+                AsyncPageable<TableEntity> queryResultsFilter = table.QueryAsync<TableEntity>(filter: $"PartitionKey eq '{code}'", select: new List<string> { "RowKey", "Key", "Text" });
+
+                await foreach (TableEntity qEntity in queryResultsFilter)
+                {
+                    data.Add(qEntity.GetString("Key"), qEntity.RowKey);
+                }
+            }
+
+            return data;
+        }
+
         [FunctionName("GetLanguages")]
         public static async Task<HttpResponseMessage> GetLanguages(
                 [HttpTrigger(AuthorizationLevel.Function, Route = "GetLanguages")] HttpRequest req)
         {
-            var serviceClient = new TableServiceClient(Environment.GetEnvironmentVariable("AzureWebJobsStorage"));
+            TableServiceClient serviceClient = new(Environment.GetEnvironmentVariable("AzureWebJobsStorage"));
             TableClient table = serviceClient.GetTableClient("Langy");
 
             Dictionary<string, string> data = await GetLanguagesAsync(table);
@@ -244,15 +303,28 @@ namespace Langy
 
         private static async Task<Dictionary<string, string>> GetLanguagesAsync(TableClient table)
         {
-            AsyncPageable<TableEntity> queryResultsFilter = table.QueryAsync<TableEntity>(filter: $"PartitionKey eq 'Langy'");
             Dictionary<string, string> data = new();
 
-            await foreach (TableEntity qEntity in queryResultsFilter)
+            AsyncPageable<TableEntity> queryResultsFilter2 = table.QueryAsync<TableEntity>(filter: $"PartitionKey eq 'Langy'", maxPerPage: 99999999);
+
+            await foreach (TableEntity qEntity in queryResultsFilter2)
             {
                 data.Add(qEntity.RowKey, qEntity.GetString("Language"));
             }
 
             return data;
+        }
+
+        private static async Task<string> GetTopOneLanguage(TableClient table)
+        {
+            AsyncPageable<TableEntity> queryResultsFilter = table.QueryAsync<TableEntity>(filter: $"PartitionKey eq 'Langy'", maxPerPage: 1);
+
+            await foreach (TableEntity qEntity in queryResultsFilter)
+            {
+                return qEntity.RowKey;
+            }
+
+            return null;
         }
     }
 }

@@ -38,7 +38,7 @@ namespace Langy
         public static async Task<List<string>> RunOrchestrator(
             [OrchestrationTrigger] IDurableOrchestrationContext context)
         {
-            var outputs = new List<string>();
+            List<string> outputs = new();
 
             MetaData metas = await context.CallActivityAsync<MetaData>(nameof(GetMetaData), true);
 
@@ -55,11 +55,11 @@ namespace Langy
             BlobContainerClient containerClient = new(Environment.GetEnvironmentVariable("AzureWebJobsStorage"), "langy-translations");
             containerClient.CreateIfNotExists();
 
-            var serviceClient = new TableServiceClient(Environment.GetEnvironmentVariable("AzureWebJobsStorage"));
+            TableServiceClient serviceClient = new(Environment.GetEnvironmentVariable("AzureWebJobsStorage"));
             TableClient table = serviceClient.GetTableClient("Langy");
             List<TableEntity> langents = new();
 
-            foreach (var lang in metas.Codes)
+            foreach (string lang in metas.Codes)
             {
                 AsyncPageable<TableEntity> queryResultsFilter = table.QueryAsync<TableEntity>(filter: $"PartitionKey eq '{lang}'");
 
@@ -75,15 +75,15 @@ namespace Langy
                     langents.Add(qEntity);
                 }
 
-                foreach (var group in metas.Groups)
+                foreach (GroupObject group in metas.Groups)
                 {
                     Dictionary<string, string> values = new();
 
                     BlobClient blobClient = containerClient.GetBlobClient(lang + "-" + group.Group);
 
-                    foreach (var id in group.Keys)
+                    foreach (string id in group.Keys)
                     {
-                        var value = langents.FirstOrDefault(e => e.GetString("Key").Equals(id) && e.PartitionKey.Equals(lang));
+                        TableEntity value = langents.FirstOrDefault(e => e.GetString("Key").Equals(id) && e.PartitionKey.Equals(lang));
 
                         if (value != null)
                         {
@@ -106,7 +106,7 @@ namespace Langy
         [FunctionName(nameof(GetMetaData))]
         public async static Task<MetaData> GetMetaData([ActivityTrigger] bool includeGroups)
         {
-            var serviceClient = new TableServiceClient(Environment.GetEnvironmentVariable("AzureWebJobsStorage"));
+            TableServiceClient serviceClient = new(Environment.GetEnvironmentVariable("AzureWebJobsStorage"));
             TableClient table = serviceClient.GetTableClient("Langy");
 
             AsyncPageable<TableEntity> queryResultsFilter = table.QueryAsync<TableEntity>(filter: $"PartitionKey eq 'Langy'", select: new List<string> { "RowKey" });
