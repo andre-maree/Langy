@@ -11,23 +11,20 @@ using Newtonsoft.Json;
 using System.Web;
 using Azure.Data.Tables;
 using Azure;
-using System.Linq;
 using System.Text.RegularExpressions;
+using System.Linq;
 
 namespace Langy
 {
     public static class LangyAPI
     {
-        [FunctionName("SaveGroupUsage")]
+        [FunctionName(nameof(SaveGroupUsage))]
         public static async Task<HttpResponseMessage> SaveGroupUsage(
         [HttpTrigger(AuthorizationLevel.System, Route = "SaveGroupUsage")] HttpRequestMessage req)
         {
             GroupObject group = await req.Content.ReadAsAsync<GroupObject>();
 
-            TableServiceClient serviceClient = new(Environment.GetEnvironmentVariable("AzureWebJobsStorage"));
-            TableClient table = serviceClient.GetTableClient("Langy");
-
-            table.CreateIfNotExists();
+            TableClient table = CreaTableClient();
 
             TableEntity tableEntity = new("Usage", HttpUtility.UrlEncodeUnicode(group.Group)) {
                 {
@@ -41,38 +38,93 @@ namespace Langy
             return req.CreateResponse(HttpStatusCode.OK);
         }
 
-        [FunctionName("SaveLanguage")]
-        public static async Task<HttpResponseMessage> SaveLanguage(
-        [HttpTrigger(AuthorizationLevel.System, Route = "SaveLanguage")] HttpRequestMessage req)
+        public static TableClient CreaTableClient()
         {
             TableServiceClient serviceClient = new(Environment.GetEnvironmentVariable("AzureWebJobsStorage"));
             TableClient table = serviceClient.GetTableClient("Langy");
 
-            table.CreateIfNotExists();
+            return table;
+        }
 
-            Dictionary<string, string> dyna = await req.Content.ReadAsAsync<Dictionary<string, string>>();
+        [FunctionName(nameof(SaveLanguage))]
+        public static async Task<HttpResponseMessage> SaveLanguage(
+        [HttpTrigger(AuthorizationLevel.System, Route = "SaveLanguage")] HttpRequestMessage req)
+        {
+            TableClient table = CreaTableClient();
 
-            TableEntity tableEntity = new("Langy", dyna["Code"])
+            NewLanguage input = await req.Content.ReadAsAsync<NewLanguage>();
+
+            Dictionary<string, string> keys = await GetLanguageItemsAsync(null);
+
+            foreach (var kvp in input.LanguageItems)
+            {
+                if (!keys.ContainsKey(kvp.Key))
                 {
+                    return new HttpResponseMessage(HttpStatusCode.BadRequest)
                     {
-                        "Language",
-                        dyna["Language"]
-                    }
+                        Content = new StringContent($"The key '{kvp.Key}' was not specified in the language items list.")
+                    };
+                }
+            }
+
+            List<TableEntity> ents = new();
+
+            foreach (KeyValuePair<string, string> kvp in input.LanguageItems)
+            {
+                var ent = ents.FirstOrDefault(e => e.RowKey.Equals(kvp.Key));
+
+                TableEntity tableEntity = new()
+                {
+                    PartitionKey = input.Code
                 };
 
-            await table.UpsertEntityAsync(tableEntity);
+                if (ent == null)
+                {
+                    if (kvp.Value.Length > 512)
+                    {
+                        tableEntity.Add("Text", kvp.Value);
+
+                        tableEntity.RowKey = kvp.Value.Remove(512);
+                    }
+                    else
+                    {
+                        tableEntity.RowKey = kvp.Value;
+                    }
+
+                    tableEntity.Add("Key", kvp.Key);
+                }
+                else//duplicate
+                {
+                    if (kvp.Value.Length > 512)
+                    {
+                        tableEntity.Add("Text", kvp.Value);
+                    }
+
+                    tableEntity.Add("Duplicate", true);
+                    tableEntity.RowKey = kvp.Key;
+                }
+
+                ents.Add(tableEntity);
+            }
+
+            TableEntity tableEntityM = new("Langy", input.Code)
+            {
+                {
+                    "Language",
+                    input.Name
+                }
+            };
+
+            await table.UpsertEntityAsync(tableEntityM);
 
             return req.CreateResponse(HttpStatusCode.OK);
         }
 
-        [FunctionName("DeleteLanguage")]
+        [FunctionName(nameof(DeleteLanguage))]
         public static async Task<HttpResponseMessage> DeleteLanguage(
         [HttpTrigger(AuthorizationLevel.System, Route = "DeleteLanguage")] HttpRequestMessage req)
         {
-            TableServiceClient serviceClient = new(Environment.GetEnvironmentVariable("AzureWebJobsStorage"));
-            TableClient table = serviceClient.GetTableClient("Langy");
-
-            table.CreateIfNotExists();
+            TableClient table = CreaTableClient();
 
             Dictionary<string, string> dyna = await req.Content.ReadAsAsync<Dictionary<string, string>>();
 
@@ -81,20 +133,20 @@ namespace Langy
             return req.CreateResponse(HttpStatusCode.OK);
         }
 
-        [FunctionName("SaveLanguageItem")]
+        [FunctionName(nameof(SaveLanguageItem))]
         public static async Task<HttpResponseMessage> SaveLanguageItem(
         [HttpTrigger(AuthorizationLevel.System, Route = "SaveLanguageItem")] HttpRequestMessage req)
         {
-            TableServiceClient serviceClient = new(Environment.GetEnvironmentVariable("AzureWebJobsStorage"));
-            TableClient table = serviceClient.GetTableClient("Langy");
+            TableClient table = CreaTableClient();
 
             Task<Dictionary<string, string>> langtask = GetLanguagesAsync(table);
 
             string uid = Regex.Replace(Convert.ToBase64String(Guid.NewGuid().ToByteArray()), "[/+=]", "");
 
             Dictionary<string, string> data = await req.Content.ReadAsAsync<Dictionary<string, string>>();
-            List<string> fails = new();
-            List<Task<Response>> tasks = new();
+            //List<string> fails = new();
+            List<Task<(TableEntity, bool)>> tasks = new();
+            List<Task<(TableEntity, bool)>> duptasks = new();
 
             await langtask;
 
@@ -122,119 +174,125 @@ namespace Langy
             foreach (KeyValuePair<string, string> kvp in data)
             {
                 string rk = HttpUtility.UrlEncodeUnicode(kvp.Value);
+
                 TableEntity tableEntity = new();
+                bool islarge = false;
 
                 if (rk.Length > 512)
                 {
                     tableEntity.Add("Text", rk);
 
                     rk = rk.Remove(512);
+
+                    islarge = true;
                 }
 
                 tableEntity.PartitionKey = kvp.Key;
                 tableEntity.RowKey = rk;
                 tableEntity.Add("Key", uid);
 
-                //if (tasks.Count < 15)
-                //{
-                    tasks.Add(table.AddEntityAsync(tableEntity));
-                //}
-                //else
-                //{
-                    Task<Response> task = null;
-
-                    try
-                    {
-                        task = await Task<Response>.WhenAny(tasks);
-
-                    if(task.IsFaulted)
-                    {
-                        if (task.Exception.GetBaseException() is RequestFailedException rfex && rfex.Status == 409)
-                        {
-                            //task.Exception.
-
-                            tableEntity.RowKey = uid;
-                            tableEntity.Add("Duplicate", true);
-                            tableEntity["Key"] = rk;
-
-                            tasks.Remove(task); 
-                            tasks.Add(table.AddEntityAsync(tableEntity));
-                        }
-                    }
-
-                        tasks.Remove(task);
-
-                        tasks.Add(table.AddEntityAsync(tableEntity));
-                    }
-                    catch (RequestFailedException ex)
-                    {
-                        if (ex.Status == 409)
-                        {
-                            tableEntity.RowKey = uid;
-                            tableEntity.Add("Duplicate", true);
-                            tableEntity["Key"] = rk;
-
-                            task.Start();
-                        }
-                        else if (ex.Status == 404)
-                        {
-                            await table.CreateIfNotExistsAsync();
-
-                            tasks.Remove(task);
-
-                            tasks.Add(table.AddEntityAsync(tableEntity));
-                        }
-                    }
+                if (tasks.Count < 1)
+                {
+                    tasks.Add(Insert(tableEntity, table));
                 }
+                else
+                {
+                    Task<(TableEntity, bool isDuplicate)> task = await Task.WhenAny(tasks);
+
+                    if (task.Result.isDuplicate)
+                    {
+                        string rowkey = task.Result.Item1.RowKey;
+                        task.Result.Item1.RowKey = task.Result.Item1.GetString("Key");
+                        task.Result.Item1.Add("Duplicate", true);
+
+                        if (islarge)
+                        {
+                            task.Result.Item1.Remove("Key");
+                        }
+                        else
+                        {
+                            task.Result.Item1["Key"] = rowkey;
+                        }
+
+                        duptasks.Add(Insert(task.Result.Item1, table));
+                    }
+
+                    tasks.Remove(task);
+
+                    tasks.Add(Insert(tableEntity, table));
+                }
+            }
+
+            while (tasks.Count > 0)
+            {
+                var task = await Task.WhenAny(tasks);
+
+                if (task.Result.Item2)
+                {
+                    string rowkey = task.Result.Item1.RowKey;
+                    task.Result.Item1.RowKey = task.Result.Item1.GetString("Key");
+                    task.Result.Item1.Add("Duplicate", true);
+
+                    if (task.Result.Item1.Keys.Contains("Text"))
+                    {
+                        task.Result.Item1.Remove("Key");
+                    }
+                    else
+                    {
+                        task.Result.Item1["Key"] = rowkey;
+                    }
+
+                    _ = tasks.Remove(task);
+
+                    duptasks.Add(Insert(task.Result.Item1, table));
+                }
+                else
+                {
+                    tasks.Remove(task);
+                }
+            }
+
+            await Task.WhenAll(duptasks);
+
+            //if (fails.Any())
+            //{
+            //    return new HttpResponseMessage(HttpStatusCode.OK)
+            //    {
+            //        Content = new StringContent(JsonConvert.SerializeObject(new { Message = "The following items failed to save because they already exist:", Fails = fails }))
+            //    };
             //}
 
-            Task task2;
+            return new HttpResponseMessage(HttpStatusCode.OK);
+        }
 
+        private static async Task<(TableEntity, bool)> Insert(TableEntity tableEntity, TableClient tc)
+        {
             try
             {
-                task2 = await Task.WhenAny(tasks);
+                Response res = await tc.AddEntityAsync(tableEntity);
             }
             catch (RequestFailedException ex)
             {
                 if (ex.Status == 409)
                 {
-                    //foreach (Task task in tasks.Where(t => !t.IsCompletedSuccessfully))
-                    //{
-                    //    fails.Add(task.Id.ToString());
-                    //}
+                    return (tableEntity, true);
                 }
                 else if (ex.Status == 404)
                 {
-                    await table.CreateIfNotExistsAsync();
+                    await tc.CreateIfNotExistsAsync();
 
-                    //List<Task> tt = tasks;
-
-                    tasks.Clear();
-
-                    //foreach (Task task in tt)
-                    //{
-                    //    task.Start();
-                    //}
+                    await Insert(tableEntity, tc);
                 }
             }
 
-            if (fails.Any())
-            {
-                return new HttpResponseMessage(HttpStatusCode.OK)
-                {
-                    Content = new StringContent(JsonConvert.SerializeObject(new { Message = "The following items failed to save because they already exist:", Fails = fails }))
-                };
-            }
-
-            return new HttpResponseMessage(HttpStatusCode.OK);
+            return (tableEntity, false);
         }
 
-        [FunctionName("GetLanguageItem")]
+        [FunctionName(nameof(GetLanguageItem))]
         public static async Task<HttpResponseMessage> GetLanguageItem(
                 [HttpTrigger(AuthorizationLevel.Function, Route = "GetLanguageItem/{code}")] HttpRequestMessage req, string code)
         {
-            TableServiceClient serviceClient = new(Environment.GetEnvironmentVariable("AzureWebJobsStorage"));
-            TableClient table = serviceClient.GetTableClient("Langy");
+            TableClient table = CreaTableClient();
 
             string text = await req.Content.ReadAsStringAsync();
 
@@ -246,7 +304,7 @@ namespace Langy
             };
         }
 
-        [FunctionName("GetLanguageItems")]
+        [FunctionName(nameof(GetLanguageItems))]
         public static async Task<HttpResponseMessage> GetLanguageItems(
                 [HttpTrigger(AuthorizationLevel.Function, Route = "GetLanguageItems/{code?}")] HttpRequestMessage req, string code)
         {
@@ -256,42 +314,71 @@ namespace Langy
             };
         }
 
-        private static async Task<Dictionary<string, string>> GetLanguageItemsAsync(string code)
+        public static async Task<Dictionary<string, string>> GetLanguageItemsAsync(string code)
         {
-            TableServiceClient serviceClient = new(Environment.GetEnvironmentVariable("AzureWebJobsStorage"));
-            TableClient table = serviceClient.GetTableClient("Langy");
+            TableClient table = CreaTableClient();
+
             Dictionary<string, string> data = new();
 
             if (code == null)
             {
                 code = await GetTopOneLanguage(table);
 
-                AsyncPageable<TableEntity> queryResultsFilter = table.QueryAsync<TableEntity>(filter: $"PartitionKey eq '{code}'", select: new List<string> { "Key" });
-                
+                AsyncPageable<TableEntity> queryResultsFilter = table.QueryAsync<TableEntity>(filter: $"PartitionKey eq '{code}'", select: new List<string> { "RowKey", "Key", "Duplicate" });
+
                 await foreach (TableEntity qEntity in queryResultsFilter)
                 {
-                    data.Add(qEntity.GetString("Key"), string.Empty);
+                    if (qEntity.GetBoolean("Duplicate") != null)
+                    {
+                        data.Add(HttpUtility.UrlDecode(qEntity.RowKey), string.Empty);
+                    }
+                    else
+                    {
+                        data.Add(qEntity.GetString("Key"), string.Empty);
+                    }
                 }
             }
             else
             {
-                AsyncPageable<TableEntity> queryResultsFilter = table.QueryAsync<TableEntity>(filter: $"PartitionKey eq '{code}'", select: new List<string> { "RowKey", "Key", "Text" });
+                AsyncPageable<TableEntity> queryResultsFilter = table.QueryAsync<TableEntity>(filter: $"PartitionKey eq '{code}'", select: new List<string> { "RowKey", "Key", "Text", "Duplicate" });
 
                 await foreach (TableEntity qEntity in queryResultsFilter)
                 {
-                    data.Add(qEntity.GetString("Key"), qEntity.RowKey);
+                    string text = qEntity.GetString("Text");
+
+                    if (qEntity.GetBoolean("Duplicate") != null)
+                    {
+                        if (text != null)
+                        {
+                            data.Add(HttpUtility.UrlDecode(qEntity.RowKey), text);
+                        }
+                        else
+                        {
+                            data.Add(HttpUtility.UrlDecode(qEntity.RowKey), qEntity.GetString("Key"));
+                        }
+                    }
+                    else
+                    {
+                        if (text != null)
+                        {
+                            data.Add(qEntity.GetString("Key"), text);
+                        }
+                        else
+                        {
+                            data.Add(qEntity.GetString("Key"), HttpUtility.UrlDecode(qEntity.RowKey));
+                        }
+                    }
                 }
             }
 
             return data;
         }
 
-        [FunctionName("GetLanguages")]
+        [FunctionName(nameof(GetLanguages))]
         public static async Task<HttpResponseMessage> GetLanguages(
                 [HttpTrigger(AuthorizationLevel.Function, Route = "GetLanguages")] HttpRequest req)
         {
-            TableServiceClient serviceClient = new(Environment.GetEnvironmentVariable("AzureWebJobsStorage"));
-            TableClient table = serviceClient.GetTableClient("Langy");
+            TableClient table = CreaTableClient();
 
             Dictionary<string, string> data = await GetLanguagesAsync(table);
 

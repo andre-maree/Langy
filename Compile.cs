@@ -2,34 +2,19 @@ using System;
 using System.Collections.Generic;
 using System.IO.Compression;
 using System.IO;
-using System.Linq;
 using System.Net.Http;
 using System.Threading.Tasks;
-using System.Web;
 using Azure;
 using Azure.Data.Tables;
 using Azure.Storage.Blobs;
 using Microsoft.Azure.WebJobs;
 using Microsoft.Azure.WebJobs.Extensions.DurableTask;
 using Microsoft.Azure.WebJobs.Extensions.Http;
-using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using System.Text;
 
 namespace Langy
 {
-    public class GroupObject
-    {
-        public string Group { get; set; }
-        public List<string> Keys { get; set; }
-    }
-
-    public class MetaData
-    {
-        public List<GroupObject> Groups { get; set; }
-        public List<string> Codes { get; set; }
-    }
-
     public class Compile
     {
         private static readonly bool Compress = false;
@@ -52,45 +37,50 @@ namespace Langy
         [FunctionName(nameof(Process))]
         public static async Task Process([ActivityTrigger] MetaData metas)
         {
-            BlobContainerClient containerClient = new(Environment.GetEnvironmentVariable("AzureWebJobsStorage"), "langy-translations");
-            containerClient.CreateIfNotExists();
-
-            TableServiceClient serviceClient = new(Environment.GetEnvironmentVariable("AzureWebJobsStorage"));
-            TableClient table = serviceClient.GetTableClient("Langy");
-            List<TableEntity> langents = new();
+            List<Task> blobtasks = new();
 
             foreach (string lang in metas.Codes)
             {
-                AsyncPageable<TableEntity> queryResultsFilter = table.QueryAsync<TableEntity>(filter: $"PartitionKey eq '{lang}'");
-
-                langents.Clear();
-
-                await foreach (TableEntity qEntity in queryResultsFilter)
+                if (blobtasks.Count < 15)
                 {
-                    if(qEntity.Keys.Count > 5)
-                    {
-                        qEntity.RowKey = qEntity.GetString("Text");
-                    }
+                    blobtasks.Add(ProcessCode(metas, lang));
+                }
+                else
+                {
+                    Task t = await Task.WhenAny(blobtasks);
 
-                    langents.Add(qEntity);
+                    blobtasks.Remove(t);
+
+                    blobtasks.Add(ProcessCode(metas, lang));
+                }
+            }
+
+            await Task.WhenAll(blobtasks);
+        }
+
+        private static async Task ProcessCode(MetaData metas, string lang)
+        {
+            BlobContainerClient containerClient = new(Environment.GetEnvironmentVariable("AzureWebJobsStorage"), "langy-translations");
+            var langitems = await LangyAPI.GetLanguageItemsAsync(lang);
+
+            foreach (GroupObject group in metas.Groups)
+            {
+                Dictionary<string, string> values = new();
+
+                BlobClient blobClient = containerClient.GetBlobClient(lang + "-" + group.Group);
+
+                foreach (string id in group.Keys)
+                {
+                    string value = langitems[id];
+
+                    if (value != null)
+                    {
+                        values.Add(id, value);
+                    }
                 }
 
-                foreach (GroupObject group in metas.Groups)
+                try
                 {
-                    Dictionary<string, string> values = new();
-
-                    BlobClient blobClient = containerClient.GetBlobClient(lang + "-" + group.Group);
-
-                    foreach (string id in group.Keys)
-                    {
-                        TableEntity value = langents.FirstOrDefault(e => e.GetString("Key").Equals(id) && e.PartitionKey.Equals(lang));
-
-                        if (value != null)
-                        {
-                            values.Add(id, HttpUtility.UrlDecode(value.RowKey));
-                        }
-                    }
-
                     if (Compress)//compress
                     {
                         await blobClient.UploadAsync(BinaryData.FromBytes(CompressJSON(JsonConvert.SerializeObject(values))), overwrite: true);
@@ -100,14 +90,22 @@ namespace Langy
                         await blobClient.UploadAsync(BinaryData.FromObjectAsJson(values), overwrite: true);
                     }
                 }
+                catch (RequestFailedException ex)
+                {
+                    if (ex.Status == 404)
+                    {
+                        await containerClient.CreateIfNotExistsAsync();
+
+                        await ProcessCode(metas, lang);
+                    }
+                }
             }
         }
 
         [FunctionName(nameof(GetMetaData))]
         public async static Task<MetaData> GetMetaData([ActivityTrigger] bool includeGroups)
         {
-            TableServiceClient serviceClient = new(Environment.GetEnvironmentVariable("AzureWebJobsStorage"));
-            TableClient table = serviceClient.GetTableClient("Langy");
+            TableClient table = LangyAPI.CreaTableClient();
 
             AsyncPageable<TableEntity> queryResultsFilter = table.QueryAsync<TableEntity>(filter: $"PartitionKey eq 'Langy'", select: new List<string> { "RowKey" });
             List<string> codes = new();
@@ -115,7 +113,6 @@ namespace Langy
             AsyncPageable<TableEntity> queryResultsFilter2 = table.QueryAsync<TableEntity>(filter: $"PartitionKey eq 'Usage'");
             List<GroupObject> groups = new();
 
-            // Iterate the <see cref="Pageable"> to access all queried entities.
             Task langTask = GetData(queryResultsFilter, codes);
 
             if (!includeGroups)
@@ -162,16 +159,18 @@ namespace Langy
             }
         }
 
-        [FunctionName("Compile_HttpStart")]
-        public static async Task<HttpResponseMessage> HttpStart(
-            [HttpTrigger(AuthorizationLevel.Anonymous, "get", "post")] HttpRequestMessage req,
+        [FunctionName(nameof(Compile_HttpStart))]
+        public static async Task<HttpResponseMessage> Compile_HttpStart(
+            [HttpTrigger(AuthorizationLevel.Anonymous, "get", "post", Route = "Compile_HttpStart/{waitseconds?}")] HttpRequestMessage req,
             [DurableClient] IDurableOrchestrationClient starter,
-            ILogger log)
+            int? waitseconds)
         {
-            // Function input comes from the request content.
             string instanceId = await starter.StartNewAsync("Compile", null);
 
-            log.LogInformation("Started orchestration with ID = '{instanceId}'.", instanceId);
+            if (waitseconds.HasValue && waitseconds.Value > 0)
+            {
+                return await starter.WaitForCompletionOrCreateCheckStatusResponseAsync(req, instanceId, timeout: TimeSpan.FromSeconds(waitseconds.Value));
+            }
 
             return starter.CreateCheckStatusResponse(req, instanceId);
         }
