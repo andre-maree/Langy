@@ -13,6 +13,8 @@ using Azure.Data.Tables;
 using Azure;
 using System.Text.RegularExpressions;
 using System.Linq;
+using Azure.Storage.Blobs;
+using Azure.Storage.Blobs.Models;
 
 namespace Langy
 {
@@ -196,6 +198,48 @@ namespace Langy
             return req.CreateResponse(HttpStatusCode.OK);
         }
 
+        [FunctionName(nameof(AddItemsToUsageGroup))]
+        public static async Task<HttpResponseMessage> AddItemsToUsageGroup(
+        [HttpTrigger(AuthorizationLevel.System, "post", Route = "AddItemsToUsageGroup")] HttpRequestMessage req)
+        {
+            TableClient table = LangyHelper.CreaTableClient();
+
+            GroupObject group = await req.Content.ReadAsAsync<GroupObject>();
+
+            Dictionary<string, string> existing = await GetLanguageItemsAsync(null);
+
+            foreach (string key in group.Keys)
+            {
+                if (!existing.ContainsKey(key))
+                {
+                    return new HttpResponseMessage(HttpStatusCode.BadRequest)
+                    {
+                        Content = new StringContent($"The key '{key}' was not found in the existing keys list.")
+                    };
+                }
+            }
+
+            TableEntity tableEntity = await table.GetEntityAsync<TableEntity>("Usage", group.Group);
+
+            List<string> items = JsonConvert.DeserializeObject<List<string>>(tableEntity.GetString("Usage"));
+
+            items.AddRange(group.Keys);
+
+            if(items.Count != items.Distinct().Count())
+            {
+                return new HttpResponseMessage(HttpStatusCode.BadRequest)
+                {
+                    Content = new StringContent($"Can not add a duplicate key to the usage group.")
+                };
+            }
+
+            tableEntity["Usage"] = JsonConvert.SerializeObject(items);
+
+            await table.UpsertEntityAsync(tableEntity);
+
+            return req.CreateResponse(HttpStatusCode.OK);
+        }
+
         [FunctionName(nameof(SaveLanguageItem))]
         public static async Task<HttpResponseMessage> SaveLanguageItem(
         [HttpTrigger(AuthorizationLevel.System, "post", Route = "SaveLanguageItem")] HttpRequestMessage req)
@@ -374,6 +418,27 @@ namespace Langy
             };
         }
 
+        [FunctionName(nameof(GetTranslations))]
+        public static async Task<Dictionary<string, Dictionary<string, string>>> GetTranslations(
+            [HttpTrigger(AuthorizationLevel.Function, "post", Route = "GetTranslations/{code}")] HttpRequestMessage req, string code)
+        {
+            BlobContainerClient containerClient = new(Environment.GetEnvironmentVariable("AzureWebJobsStorage"), "langy-translations");
+
+            List<string> groups = await req.Content.ReadAsAsync<List<string>>();
+
+            Dictionary<string, Dictionary<string, string>> data = new();
+
+            foreach (string group in groups)
+            {
+                BlobClient blobClient = containerClient.GetBlobClient(code + "-" + group);
+                BlobDownloadResult downloadResult = await blobClient.DownloadContentAsync();
+                Dictionary<string, string> blobContents = JsonConvert.DeserializeObject<Dictionary<string, string>>(downloadResult.Content.ToString());
+                data.Add(group, blobContents);
+            }
+
+            return data;
+        }
+
         [FunctionName(nameof(GetUsageGroups))]
         public static async Task<List<GroupObject>> GetUsageGroups(
             [HttpTrigger(AuthorizationLevel.Function, "get", Route = "GetUsageGroups/{group?}")] HttpRequestMessage req, string group)
@@ -501,6 +566,43 @@ namespace Langy
         #endregion
 
         #region Delete
+
+        [FunctionName(nameof(RemoveItemsFromUsageGroup))]
+        public static async Task<HttpResponseMessage> RemoveItemsFromUsageGroup(
+        [HttpTrigger(AuthorizationLevel.System, "delete", Route = "RemoveItemsFromUsageGroup")] HttpRequestMessage req)
+        {
+            TableClient table = LangyHelper.CreaTableClient();
+
+            GroupObject group = await req.Content.ReadAsAsync<GroupObject>();
+
+            Dictionary<string, string> existing = await GetLanguageItemsAsync(null);
+
+            foreach (string key in group.Keys)
+            {
+                if (!existing.ContainsKey(key))
+                {
+                    return new HttpResponseMessage(HttpStatusCode.BadRequest)
+                    {
+                        Content = new StringContent($"The key '{key}' was not found in the existing keys list.")
+                    };
+                }
+            }
+
+            TableEntity tableEntity = await table.GetEntityAsync<TableEntity>("Usage", group.Group);
+
+            List<string> items = JsonConvert.DeserializeObject<List<string>>(tableEntity.GetString("Usage"));
+
+            foreach(string key in group.Keys)
+            {
+                items.Remove(key);
+            }
+
+            tableEntity["Usage"] = JsonConvert.SerializeObject(items);
+
+            await table.UpsertEntityAsync(tableEntity);
+
+            return req.CreateResponse(HttpStatusCode.OK);
+        }
 
         [FunctionName(nameof(DeleteLanguage))]
         public static async Task<HttpResponseMessage> DeleteLanguage(
