@@ -20,7 +20,7 @@ namespace Langy
         private static readonly bool Compress = false;
 
         [FunctionName("Compile")]
-        public static async Task<List<string>> RunOrchestrator(
+        public static async Task<string> RunOrchestrator(
             [OrchestrationTrigger] IDurableOrchestrationContext context)
         {
             List<string> outputs = new();
@@ -31,7 +31,7 @@ namespace Langy
 
             await context.CallActivityAsync(nameof(Process), metas);
 
-            return outputs;
+            return "Compilation complete.";
         }
 
         [FunctionName(nameof(Process))]
@@ -61,7 +61,8 @@ namespace Langy
         private static async Task ProcessCode(MetaData metas, string lang)
         {
             BlobContainerClient containerClient = new(Environment.GetEnvironmentVariable("AzureWebJobsStorage"), "langy-translations");
-            var langitems = await LangyAPI.GetLanguageItemsAsync(lang);
+
+            Dictionary<string, string> langitems = await LangyAPI.GetLanguageItemsAsync(lang);
 
             foreach (GroupObject group in metas.Groups)
             {
@@ -105,7 +106,7 @@ namespace Langy
         [FunctionName(nameof(GetMetaData))]
         public async static Task<MetaData> GetMetaData([ActivityTrigger] bool includeGroups)
         {
-            TableClient table = LangyAPI.CreaTableClient();
+            TableClient table = LangyHelper.CreaTableClient();
 
             AsyncPageable<TableEntity> queryResultsFilter = table.QueryAsync<TableEntity>(filter: $"PartitionKey eq 'Langy'", select: new List<string> { "RowKey" });
             List<string> codes = new();
@@ -159,9 +160,9 @@ namespace Langy
             }
         }
 
-        [FunctionName(nameof(Compile_HttpStart))]
-        public static async Task<HttpResponseMessage> Compile_HttpStart(
-            [HttpTrigger(AuthorizationLevel.Anonymous, "get", "post", Route = "Compile_HttpStart/{waitseconds?}")] HttpRequestMessage req,
+        [FunctionName(nameof(Compile_Start))]
+        public static async Task<HttpResponseMessage> Compile_Start(
+            [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "Compile_HttpStart/{waitseconds:int?}")] HttpRequestMessage req,
             [DurableClient] IDurableOrchestrationClient starter,
             int? waitseconds)
         {
@@ -175,7 +176,7 @@ namespace Langy
             return starter.CreateCheckStatusResponse(req, instanceId);
         }
 
-        public static byte[] CompressJSON(string originalString)
+        private static byte[] CompressJSON(string originalString)
         {
             byte[] dataToCompress = Encoding.Unicode.GetBytes(originalString);
 

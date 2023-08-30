@@ -18,15 +18,30 @@ namespace Langy
 {
     public static class LangyAPI
     {
+        #region Save
+
         [FunctionName(nameof(SaveGroupUsage))]
         public static async Task<HttpResponseMessage> SaveGroupUsage(
-        [HttpTrigger(AuthorizationLevel.System, Route = "SaveGroupUsage")] HttpRequestMessage req)
+        [HttpTrigger(AuthorizationLevel.System, "post", Route = "SaveGroupUsage")] HttpRequestMessage req)
         {
             GroupObject group = await req.Content.ReadAsAsync<GroupObject>();
 
-            TableClient table = CreaTableClient();
+            Dictionary<string, string> existing = await GetLanguageItemsAsync(null);
 
-            TableEntity tableEntity = new("Usage", HttpUtility.UrlEncodeUnicode(group.Group)) {
+            foreach (string key in group.Keys)
+            {
+                if (!existing.ContainsKey(key))
+                {
+                    return new HttpResponseMessage(HttpStatusCode.BadRequest)
+                    {
+                        Content = new StringContent($"The key '{key}' was not found in the existing keys list.")
+                    };
+                }
+            }
+
+            TableClient table = LangyHelper.CreaTableClient();
+
+            TableEntity tableEntity = new("Usage", HttpUtility.UrlEncode(group.Group)) {
                 {
                     "Usage",
                     JsonConvert.SerializeObject(group.Keys)
@@ -38,40 +53,85 @@ namespace Langy
             return req.CreateResponse(HttpStatusCode.OK);
         }
 
-        public static TableClient CreaTableClient()
-        {
-            TableServiceClient serviceClient = new(Environment.GetEnvironmentVariable("AzureWebJobsStorage"));
-            TableClient table = serviceClient.GetTableClient("Langy");
-
-            return table;
-        }
-
         [FunctionName(nameof(SaveLanguage))]
         public static async Task<HttpResponseMessage> SaveLanguage(
-        [HttpTrigger(AuthorizationLevel.System, Route = "SaveLanguage")] HttpRequestMessage req)
+        [HttpTrigger(AuthorizationLevel.System, "post", Route = "SaveLanguage")] HttpRequestMessage req)
         {
-            TableClient table = CreaTableClient();
+            TableClient table = LangyHelper.CreaTableClient();
 
             NewLanguage input = await req.Content.ReadAsAsync<NewLanguage>();
 
-            Dictionary<string, string> keys = await GetLanguageItemsAsync(null);
+            input.Code = input.Code.ToLower();
 
-            foreach (var kvp in input.LanguageItems)
+            Task<NullableResponse<TableEntity>> maincheck = table.GetEntityIfExistsAsync<TableEntity>("Langy", input.Code);
+
+            Task<Dictionary<string, string>> existingtask = GetLanguageItemsAsync(null);
+
+            await maincheck;
+
+            if(maincheck.Result.HasValue)
             {
-                if (!keys.ContainsKey(kvp.Key))
+                return new HttpResponseMessage(HttpStatusCode.BadRequest)
+                {
+                    Content = new StringContent($"This language already exists.")
+                };
+            }
+
+            await existingtask;
+
+            Dictionary<string, string> existing = existingtask.Result;
+
+            bool is1st = true;
+
+            if(existing.Count > 0)
+            {
+                if(existing.Count != input.LanguageItems.Count)
                 {
                     return new HttpResponseMessage(HttpStatusCode.BadRequest)
                     {
-                        Content = new StringContent($"The key '{kvp.Key}' was not specified in the language items list.")
+                        Content = new StringContent($"The key count is incorrect: input = {input.LanguageItems.Count} and existing = {existing.Count}.")
                     };
                 }
+
+                foreach (LanguageItem kvp in input.LanguageItems)
+                {
+                    if(string.IsNullOrWhiteSpace(kvp.Key))
+                    {
+                        return new HttpResponseMessage(HttpStatusCode.BadRequest)
+                        {
+                            Content = new StringContent($"A key was found that does not contain a value.")
+                        };
+                    }
+
+                    if (!existing.ContainsKey(kvp.Key))
+                    {
+                        return new HttpResponseMessage(HttpStatusCode.BadRequest)
+                        {
+                            Content = new StringContent($"The key '{kvp.Key}' was not found in the the existing keys.")
+                        };
+                    }
+
+                    if(input.LanguageItems.Where(e=>e.Key.Equals(kvp.Key)).Take(2).Count() == 2)
+                    {
+                        return new HttpResponseMessage(HttpStatusCode.BadRequest)
+                        {
+                            Content = new StringContent($"The key '{kvp.Key}' is a duplicate.")
+                        };
+                    }
+                }
+
+                is1st = false;
             }
 
-            List<TableEntity> ents = new();
+            List<TableTransactionAction> bop = new();
 
-            foreach (KeyValuePair<string, string> kvp in input.LanguageItems)
+            foreach (LanguageItem kvp in input.LanguageItems)
             {
-                var ent = ents.FirstOrDefault(e => e.RowKey.Equals(kvp.Key));
+                string uid = is1st 
+                    ? Regex.Replace(Convert.ToBase64String(Guid.NewGuid().ToByteArray()), "[/+=]", "")
+                    : kvp.Key;
+
+                TableTransactionAction ent = bop.FirstOrDefault(e => e.Entity.RowKey.Equals(kvp.Text));
 
                 TableEntity tableEntity = new()
                 {
@@ -80,31 +140,47 @@ namespace Langy
 
                 if (ent == null)
                 {
-                    if (kvp.Value.Length > 512)
+                    if (kvp.Text.Length > 512)
                     {
-                        tableEntity.Add("Text", kvp.Value);
+                        tableEntity.Add("Text", kvp.Text);
 
-                        tableEntity.RowKey = kvp.Value.Remove(512);
+                        tableEntity.RowKey = HttpUtility.UrlEncode(kvp.Text.Remove(512));
                     }
                     else
                     {
-                        tableEntity.RowKey = kvp.Value;
+                        tableEntity.RowKey = HttpUtility.UrlEncode(kvp.Text);
                     }
 
-                    tableEntity.Add("Key", kvp.Key);
+                    tableEntity.Add("Key", uid);
                 }
                 else//duplicate
                 {
-                    if (kvp.Value.Length > 512)
+                    if (kvp.Text.Length > 512)
                     {
-                        tableEntity.Add("Text", kvp.Value);
+                        tableEntity.Add("Text", kvp.Text);
+                    }
+                    else
+                    {
+                        tableEntity.Add("Key", kvp.Text);
                     }
 
                     tableEntity.Add("Duplicate", true);
-                    tableEntity.RowKey = kvp.Key;
+                    tableEntity.RowKey = uid;
                 }
 
-                ents.Add(tableEntity);
+                bop.Add(new TableTransactionAction(TableTransactionActionType.UpsertReplace, tableEntity));
+
+                if (bop.Count == 100)
+                {
+                    await table.SubmitTransactionAsync(bop);
+
+                    bop.Clear();
+                }
+            }
+
+            if (bop.Any())
+            {
+                await table.SubmitTransactionAsync(bop);
             }
 
             TableEntity tableEntityM = new("Langy", input.Code)
@@ -120,31 +196,18 @@ namespace Langy
             return req.CreateResponse(HttpStatusCode.OK);
         }
 
-        [FunctionName(nameof(DeleteLanguage))]
-        public static async Task<HttpResponseMessage> DeleteLanguage(
-        [HttpTrigger(AuthorizationLevel.System, Route = "DeleteLanguage")] HttpRequestMessage req)
-        {
-            TableClient table = CreaTableClient();
-
-            Dictionary<string, string> dyna = await req.Content.ReadAsAsync<Dictionary<string, string>>();
-
-            await table.DeleteEntityAsync("Langy", dyna["Code"]);
-
-            return req.CreateResponse(HttpStatusCode.OK);
-        }
-
         [FunctionName(nameof(SaveLanguageItem))]
         public static async Task<HttpResponseMessage> SaveLanguageItem(
-        [HttpTrigger(AuthorizationLevel.System, Route = "SaveLanguageItem")] HttpRequestMessage req)
+        [HttpTrigger(AuthorizationLevel.System, "post", Route = "SaveLanguageItem")] HttpRequestMessage req)
         {
-            TableClient table = CreaTableClient();
+            TableClient table = LangyHelper.CreaTableClient();
 
             Task<Dictionary<string, string>> langtask = GetLanguagesAsync(table);
 
             string uid = Regex.Replace(Convert.ToBase64String(Guid.NewGuid().ToByteArray()), "[/+=]", "");
 
             Dictionary<string, string> data = await req.Content.ReadAsAsync<Dictionary<string, string>>();
-            //List<string> fails = new();
+            
             List<Task<(TableEntity, bool)>> tasks = new();
             List<Task<(TableEntity, bool)>> duptasks = new();
 
@@ -166,21 +229,21 @@ namespace Langy
                 {
                     return new HttpResponseMessage(HttpStatusCode.BadRequest)
                     {
-                        Content = new StringContent($"The input language code {lang.Key} is missing.")
+                        Content = new StringContent($"The input language code '{lang.Key}' is missing.")
                     };
                 }
             }
 
             foreach (KeyValuePair<string, string> kvp in data)
             {
-                string rk = HttpUtility.UrlEncodeUnicode(kvp.Value);
+                string rk = HttpUtility.UrlEncode(kvp.Value);
 
                 TableEntity tableEntity = new();
                 bool islarge = false;
 
                 if (rk.Length > 512)
                 {
-                    tableEntity.Add("Text", rk);
+                    tableEntity.Add("Text", kvp.Value);
 
                     rk = rk.Remove(512);
 
@@ -211,7 +274,7 @@ namespace Langy
                         }
                         else
                         {
-                            task.Result.Item1["Key"] = rowkey;
+                            task.Result.Item1["Key"] = HttpUtility.UrlDecode(rowkey);
                         }
 
                         duptasks.Add(Insert(task.Result.Item1, table));
@@ -225,7 +288,7 @@ namespace Langy
 
             while (tasks.Count > 0)
             {
-                var task = await Task.WhenAny(tasks);
+                Task<(TableEntity, bool)> task = await Task.WhenAny(tasks);
 
                 if (task.Result.Item2)
                 {
@@ -239,7 +302,7 @@ namespace Langy
                     }
                     else
                     {
-                        task.Result.Item1["Key"] = rowkey;
+                        task.Result.Item1["Key"] = HttpUtility.UrlDecode(rowkey);
                     }
 
                     _ = tasks.Remove(task);
@@ -253,14 +316,6 @@ namespace Langy
             }
 
             await Task.WhenAll(duptasks);
-
-            //if (fails.Any())
-            //{
-            //    return new HttpResponseMessage(HttpStatusCode.OK)
-            //    {
-            //        Content = new StringContent(JsonConvert.SerializeObject(new { Message = "The following items failed to save because they already exist:", Fails = fails }))
-            //    };
-            //}
 
             return new HttpResponseMessage(HttpStatusCode.OK);
         }
@@ -288,11 +343,15 @@ namespace Langy
             return (tableEntity, false);
         }
 
+        #endregion
+
+        #region Get
+
         [FunctionName(nameof(GetLanguageItem))]
         public static async Task<HttpResponseMessage> GetLanguageItem(
-                [HttpTrigger(AuthorizationLevel.Function, Route = "GetLanguageItem/{code}")] HttpRequestMessage req, string code)
+                [HttpTrigger(AuthorizationLevel.Function, "post", Route = "GetLanguageItem/{code}")] HttpRequestMessage req, string code)
         {
-            TableClient table = CreaTableClient();
+            TableClient table = LangyHelper.CreaTableClient();
 
             string text = await req.Content.ReadAsStringAsync();
 
@@ -306,7 +365,8 @@ namespace Langy
 
         [FunctionName(nameof(GetLanguageItems))]
         public static async Task<HttpResponseMessage> GetLanguageItems(
-                [HttpTrigger(AuthorizationLevel.Function, Route = "GetLanguageItems/{code?}")] HttpRequestMessage req, string code)
+            [HttpTrigger(AuthorizationLevel.Function, "get", Route = "GetLanguageItems/{code}")] HttpRequestMessage req,
+            string code)
         {
             return new HttpResponseMessage(HttpStatusCode.OK)
             {
@@ -316,7 +376,7 @@ namespace Langy
 
         public static async Task<Dictionary<string, string>> GetLanguageItemsAsync(string code)
         {
-            TableClient table = CreaTableClient();
+            TableClient table = LangyHelper.CreaTableClient();
 
             Dictionary<string, string> data = new();
 
@@ -354,7 +414,7 @@ namespace Langy
                         }
                         else
                         {
-                            data.Add(HttpUtility.UrlDecode(qEntity.RowKey), qEntity.GetString("Key"));
+                            data.Add(qEntity.RowKey, qEntity.GetString("Key"));
                         }
                     }
                     else
@@ -376,9 +436,9 @@ namespace Langy
 
         [FunctionName(nameof(GetLanguages))]
         public static async Task<HttpResponseMessage> GetLanguages(
-                [HttpTrigger(AuthorizationLevel.Function, Route = "GetLanguages")] HttpRequest req)
+                [HttpTrigger(AuthorizationLevel.Function, "get", Route = "GetLanguages")] HttpRequest req)
         {
-            TableClient table = CreaTableClient();
+            TableClient table = LangyHelper.CreaTableClient();
 
             Dictionary<string, string> data = await GetLanguagesAsync(table);
 
@@ -413,5 +473,24 @@ namespace Langy
 
             return null;
         }
+
+        #endregion
+
+        #region Delete
+
+        [FunctionName(nameof(DeleteLanguage))]
+        public static async Task<HttpResponseMessage> DeleteLanguage(
+        [HttpTrigger(AuthorizationLevel.System, "delete", Route = "DeleteLanguage")] HttpRequestMessage req)
+        {
+            TableClient table = LangyHelper.CreaTableClient();
+
+            Dictionary<string, string> dyna = await req.Content.ReadAsAsync<Dictionary<string, string>>();
+
+            await table.DeleteEntityAsync("Langy", dyna["Code"]);
+
+            return req.CreateResponse(HttpStatusCode.OK);
+        }
+
+        #endregion
     }
 }
