@@ -69,7 +69,7 @@ namespace Langy
 
             await maincheck;
 
-            if(maincheck.Result.HasValue)
+            if (maincheck.Result.HasValue)
             {
                 return new HttpResponseMessage(HttpStatusCode.BadRequest)
                 {
@@ -83,9 +83,9 @@ namespace Langy
 
             bool is1st = true;
 
-            if(existing.Count > 0)
+            if (existing.Count > 0)
             {
-                if(existing.Count != input.LanguageItems.Count)
+                if (existing.Count != input.LanguageItems.Count)
                 {
                     return new HttpResponseMessage(HttpStatusCode.BadRequest)
                     {
@@ -95,7 +95,7 @@ namespace Langy
 
                 foreach (LanguageItem kvp in input.LanguageItems)
                 {
-                    if(string.IsNullOrWhiteSpace(kvp.Key))
+                    if (string.IsNullOrWhiteSpace(kvp.Key))
                     {
                         return new HttpResponseMessage(HttpStatusCode.BadRequest)
                         {
@@ -111,7 +111,7 @@ namespace Langy
                         };
                     }
 
-                    if(input.LanguageItems.Where(e=>e.Key.Equals(kvp.Key)).Take(2).Count() == 2)
+                    if (input.LanguageItems.Where(e => e.Key.Equals(kvp.Key)).Take(2).Count() == 2)
                     {
                         return new HttpResponseMessage(HttpStatusCode.BadRequest)
                         {
@@ -127,7 +127,7 @@ namespace Langy
 
             foreach (LanguageItem kvp in input.LanguageItems)
             {
-                string uid = is1st 
+                string uid = is1st
                     ? Regex.Replace(Convert.ToBase64String(Guid.NewGuid().ToByteArray()), "[/+=]", "")
                     : kvp.Key;
 
@@ -207,7 +207,7 @@ namespace Langy
             string uid = Regex.Replace(Convert.ToBase64String(Guid.NewGuid().ToByteArray()), "[/+=]", "");
 
             Dictionary<string, string> data = await req.Content.ReadAsAsync<Dictionary<string, string>>();
-            
+
             List<Task<(TableEntity, bool)>> tasks = new();
             List<Task<(TableEntity, bool)>> duptasks = new();
 
@@ -365,13 +365,37 @@ namespace Langy
 
         [FunctionName(nameof(GetLanguageItems))]
         public static async Task<HttpResponseMessage> GetLanguageItems(
-            [HttpTrigger(AuthorizationLevel.Function, "get", Route = "GetLanguageItems/{code}")] HttpRequestMessage req,
+            [HttpTrigger(AuthorizationLevel.Function, "get", Route = "GetLanguageItems/{code?}")] HttpRequestMessage req,
             string code)
         {
             return new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = new StringContent(JsonConvert.SerializeObject(await GetLanguageItemsAsync(code)))
             };
+        }
+
+        [FunctionName(nameof(GetUsageGroups))]
+        public static async Task<List<GroupObject>> GetUsageGroups(
+            [HttpTrigger(AuthorizationLevel.Function, "get", Route = "GetUsageGroups/{group?}")] HttpRequestMessage req, string group)
+        {
+            TableClient table = LangyHelper.CreaTableClient();
+
+            List<GroupObject> data = new();
+
+            group = group == null ? "" : $"and RowKey eq '{group}'";
+
+            AsyncPageable<TableEntity> queryResultsFilter = table.QueryAsync<TableEntity>(filter: $"PartitionKey eq 'Usage' {group}", select: new List<string> { "RowKey", "Usage" });
+
+            await foreach (TableEntity qEntity in queryResultsFilter)
+            {
+                data.Add(new GroupObject()
+                {
+                    Group = qEntity.RowKey,
+                    Keys = JsonConvert.DeserializeObject<List<string>>(qEntity.GetString("Usage"))
+                });
+            }
+
+            return data;
         }
 
         public static async Task<Dictionary<string, string>> GetLanguageItemsAsync(string code)

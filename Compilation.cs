@@ -15,12 +15,12 @@ using System.Text;
 
 namespace Langy
 {
-    public class Compile
+    public class Compilation
     {
         private static readonly bool Compress = false;
 
-        [FunctionName("Compile")]
-        public static async Task<string> RunOrchestrator(
+        [FunctionName("CompileOrchestrator")]
+        public static async Task<string> CompileOrchestrator(
             [OrchestrationTrigger] IDurableOrchestrationContext context)
         {
             List<string> outputs = new();
@@ -160,13 +160,13 @@ namespace Langy
             }
         }
 
-        [FunctionName(nameof(Compile_Start))]
-        public static async Task<HttpResponseMessage> Compile_Start(
-            [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "Compile_HttpStart/{waitseconds:int?}")] HttpRequestMessage req,
+        [FunctionName(nameof(Compile))]
+        public static async Task<HttpResponseMessage> Compile(
+            [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "Compile/{waitseconds:int?}")] HttpRequestMessage req,
             [DurableClient] IDurableOrchestrationClient starter,
             int? waitseconds)
         {
-            string instanceId = await starter.StartNewAsync("Compile", null);
+            string instanceId = await starter.StartNewAsync(nameof(CompileOrchestrator), null);
 
             if (waitseconds.HasValue && waitseconds.Value > 0)
             {
