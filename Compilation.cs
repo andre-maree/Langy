@@ -23,9 +23,11 @@ namespace Langy
         public static async Task<string> CompileOrchestrator(
             [OrchestrationTrigger] IDurableOrchestrationContext context)
         {
+            string filter = context.GetInput<string>();
+
             List<string> outputs = new();
 
-            MetaData metas = await context.CallActivityAsync<MetaData>(nameof(GetMetaData), true);
+            MetaData metas = await context.CallActivityAsync<MetaData>(nameof(GetMetaData), (true, filter));
 
             outputs.AddRange(metas.Codes);
 
@@ -104,19 +106,29 @@ namespace Langy
         }
 
         [FunctionName(nameof(GetMetaData))]
-        public async static Task<MetaData> GetMetaData([ActivityTrigger] bool includeGroups)
+        public async static Task<MetaData> GetMetaData([ActivityTrigger] (bool includeGroups, string filter) input)
         {
             TableClient table = LangyHelper.CreaTableClient();
 
             AsyncPageable<TableEntity> queryResultsFilter = table.QueryAsync<TableEntity>(filter: $"PartitionKey eq 'Langy'", select: new List<string> { "RowKey" });
             List<string> codes = new();
 
-            AsyncPageable<TableEntity> queryResultsFilter2 = table.QueryAsync<TableEntity>(filter: $"PartitionKey eq 'Usage'");
+            AsyncPageable<TableEntity> queryResultsFilter2;
+
+            if (!input.filter.Equals("all", StringComparison.OrdinalIgnoreCase))
+            {
+                queryResultsFilter2 = table.QueryAsync<TableEntity>(filter: $"PartitionKey eq 'Usage' and RowKey ge '{input.filter}' and RowKey lt '{input.filter}ZZZZZZZZZZZZZZZZ'");
+            }
+            else
+            {
+                queryResultsFilter2 = table.QueryAsync<TableEntity>(filter: $"PartitionKey eq 'Usage'");
+            }
+
             List<GroupObject> groups = new();
 
             Task langTask = GetData(queryResultsFilter, codes);
 
-            if (!includeGroups)
+            if (!input.includeGroups)
             {
                 await langTask;
 
@@ -162,11 +174,11 @@ namespace Langy
 
         [FunctionName(nameof(Compile))]
         public static async Task<HttpResponseMessage> Compile(
-            [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "Compile/{waitseconds:int?}")] HttpRequestMessage req,
-            [DurableClient] IDurableOrchestrationClient starter,
+            [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "Compile/{prefix}/{waitseconds:int?}")] HttpRequestMessage req,
+            [DurableClient] IDurableOrchestrationClient starter, string prefix,
             int? waitseconds)
         {
-            string instanceId = await starter.StartNewAsync(nameof(CompileOrchestrator), null);
+            string instanceId = await starter.StartNewAsync(nameof(CompileOrchestrator), null, prefix);
 
             if (waitseconds.HasValue && waitseconds.Value > 0)
             {
