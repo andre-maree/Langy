@@ -28,7 +28,9 @@ namespace Langy
         {
             GroupObject group = await req.Content.ReadAsAsync<GroupObject>();
 
-            Dictionary<string, string> existing = await GetLanguageItemsAsync(null);
+            TableClient table = LangyHelper.CreaTableClient();
+
+            Dictionary<string, string> existing = await GetLanguageItemsAsync(null, table);
 
             foreach (string key in group.Keys)
             {
@@ -40,8 +42,6 @@ namespace Langy
                     };
                 }
             }
-
-            TableClient table = LangyHelper.CreaTableClient();
 
             TableEntity tableEntity = new("Usage", HttpUtility.UrlEncode(group.Group)) {
                 {
@@ -65,12 +65,14 @@ namespace Langy
 
             input.Code = input.Code.ToLower();
 
+            await table.CreateIfNotExistsAsync();
+
             Task<NullableResponse<TableEntity>> maincheck = table.GetEntityIfExistsAsync<TableEntity>("Langy", input.Code);
 
-            Task<Dictionary<string, string>> existingtask = GetLanguageItemsAsync(null);
-
+            Task<Dictionary<string, string>> existingtask = GetLanguageItemsAsync(null, table);
+            
             await maincheck;
-
+            
             if (maincheck.Result.HasValue)
             {
                 return new HttpResponseMessage(HttpStatusCode.BadRequest)
@@ -206,7 +208,7 @@ namespace Langy
 
             GroupObject group = await req.Content.ReadAsAsync<GroupObject>();
 
-            Dictionary<string, string> existing = await GetLanguageItemsAsync(null);
+            Dictionary<string, string> existing = await GetLanguageItemsAsync(null, table);
 
             foreach (string key in group.Keys)
             {
@@ -225,7 +227,7 @@ namespace Langy
 
             items.AddRange(group.Keys);
 
-            if(items.Count != items.Distinct().Count())
+            if (items.Count != items.Distinct().Count())
             {
                 return new HttpResponseMessage(HttpStatusCode.BadRequest)
                 {
@@ -414,7 +416,7 @@ namespace Langy
         {
             return new HttpResponseMessage(HttpStatusCode.OK)
             {
-                Content = new StringContent(JsonConvert.SerializeObject(await GetLanguageItemsAsync(code)))
+                Content = new StringContent(JsonConvert.SerializeObject(await GetLanguageItemsAsync(code, LangyHelper.CreaTableClient())))
             };
         }
 
@@ -463,9 +465,9 @@ namespace Langy
             return data;
         }
 
-        public static async Task<Dictionary<string, string>> GetLanguageItemsAsync(string code)
+        public static async Task<Dictionary<string, string>> GetLanguageItemsAsync(string code, TableClient table)
         {
-            TableClient table = LangyHelper.CreaTableClient();
+            //TableClient table = LangyHelper.CreaTableClient();
 
             Dictionary<string, string> data = new();
 
@@ -575,7 +577,7 @@ namespace Langy
 
             GroupObject group = await req.Content.ReadAsAsync<GroupObject>();
 
-            Dictionary<string, string> existing = await GetLanguageItemsAsync(null);
+            Dictionary<string, string> existing = await GetLanguageItemsAsync(null, table);
 
             foreach (string key in group.Keys)
             {
@@ -592,7 +594,7 @@ namespace Langy
 
             List<string> items = JsonConvert.DeserializeObject<List<string>>(tableEntity.GetString("Usage"));
 
-            foreach(string key in group.Keys)
+            foreach (string key in group.Keys)
             {
                 items.Remove(key);
             }

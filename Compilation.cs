@@ -64,7 +64,7 @@ namespace Langy
         {
             BlobContainerClient containerClient = new(Environment.GetEnvironmentVariable("AzureWebJobsStorage"), "langy-translations");
 
-            Dictionary<string, string> langitems = await LangyAPI.GetLanguageItemsAsync(lang);
+            Dictionary<string, string> langitems = await LangyAPI.GetLanguageItemsAsync(lang, LangyHelper.CreaTableClient());
 
             foreach (GroupObject group in metas.Groups)
             {
