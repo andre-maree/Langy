@@ -14,7 +14,6 @@ using Azure;
 using System.Text.RegularExpressions;
 using System.Linq;
 using Azure.Storage.Blobs;
-using Azure.Storage.Blobs.Models;
 
 namespace Langy
 {
@@ -70,9 +69,9 @@ namespace Langy
             Task<NullableResponse<TableEntity>> maincheck = table.GetEntityIfExistsAsync<TableEntity>("Langy", input.Code);
 
             Task<Dictionary<string, string>> existingtask = GetLanguageItemsAsync(null, table);
-            
+
             await maincheck;
-            
+
             if (maincheck.Result.HasValue)
             {
                 return new HttpResponseMessage(HttpStatusCode.BadRequest)
@@ -430,15 +429,48 @@ namespace Langy
 
             Dictionary<string, Dictionary<string, string>> data = new();
 
+            List<Task<(string group, string data)>> blobtasks = new();
+
             foreach (string group in groups)
             {
-                BlobClient blobClient = containerClient.GetBlobClient(code + "-" + group);
-                BlobDownloadResult downloadResult = await blobClient.DownloadContentAsync();
-                Dictionary<string, string> blobContents = JsonConvert.DeserializeObject<Dictionary<string, string>>(downloadResult.Content.ToString());
-                data.Add(group, blobContents);
+                if (blobtasks.Count < 10)
+                {
+                    blobtasks.Add(GetBlobData(group, containerClient, code));
+                }
+                else
+                {
+                    await CheckTasks(data, blobtasks);
+
+                    blobtasks.Add(GetBlobData(group, containerClient, code));
+                }
+            }
+
+            while (blobtasks.Count > 0)
+            {
+                await CheckTasks(data, blobtasks);
             }
 
             return data;
+
+            static async Task CheckTasks(Dictionary<string, Dictionary<string, string>> data, List<Task<(string group, string data)>> blobtasks)
+            {
+                Task<(string group, string data)> task = await Task.WhenAny(blobtasks);
+
+                blobtasks.Remove(task);
+
+                Dictionary<string, string> blobContents = JsonConvert.DeserializeObject<Dictionary<string, string>>(task.Result.data);
+
+                data.Add(task.Result.group, blobContents);
+            }
+        }
+
+        private static async Task<(string group, string data)> GetBlobData(string group, BlobContainerClient containerClient, string code)
+        {
+            BlobClient blobClient = containerClient.GetBlobClient(code + "-" + group);
+
+            var result = await blobClient.DownloadContentAsync();
+
+            return (group, result.Value.Content.ToString());
         }
 
         [FunctionName(nameof(GetUsageGroups))]

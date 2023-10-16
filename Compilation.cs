@@ -43,7 +43,7 @@ namespace Langy
 
             foreach (string lang in metas.Codes)
             {
-                if (blobtasks.Count < 15)
+                if (blobtasks.Count < 10)
                 {
                     blobtasks.Add(ProcessCode(metas, lang));
                 }
@@ -64,7 +64,13 @@ namespace Langy
         {
             BlobContainerClient containerClient = new(Environment.GetEnvironmentVariable("AzureWebJobsStorage"), "langy-translations");
 
+            Task containerTask = containerClient.CreateIfNotExistsAsync();
+
             Dictionary<string, string> langitems = await LangyAPI.GetLanguageItemsAsync(lang, LangyHelper.CreaTableClient());
+
+            List<Task> blobtasks = new();
+
+            await containerTask;
 
             foreach (GroupObject group in metas.Groups)
             {
@@ -82,25 +88,31 @@ namespace Langy
                     }
                 }
 
-                try
+                if (blobtasks.Count < 10)
                 {
-                    if (Compress)//compress
-                    {
-                        await blobClient.UploadAsync(BinaryData.FromBytes(CompressJSON(JsonConvert.SerializeObject(values))), overwrite: true);
-                    }
-                    else
-                    {
-                        await blobClient.UploadAsync(BinaryData.FromObjectAsJson(values), overwrite: true);
-                    }
+                    SaveBlob(blobtasks, values, blobClient);
                 }
-                catch (RequestFailedException ex)
+                else
                 {
-                    if (ex.Status == 404)
-                    {
-                        await containerClient.CreateIfNotExistsAsync();
+                    Task t = await Task.WhenAny(blobtasks);
 
-                        await ProcessCode(metas, lang);
-                    }
+                    blobtasks.Remove(t);
+
+                    SaveBlob(blobtasks, values, blobClient);
+                }
+
+                await Task.WhenAll(blobtasks);
+            }
+
+            static void SaveBlob(List<Task> blobtasks, Dictionary<string, string> values, BlobClient blobClient)
+            {
+                if (Compress)//compress
+                {
+                    blobtasks.Add(blobClient.UploadAsync(BinaryData.FromBytes(CompressJSON(JsonConvert.SerializeObject(values))), overwrite: true));
+                }
+                else
+                {
+                    blobtasks.Add(blobClient.UploadAsync(BinaryData.FromObjectAsJson(values), overwrite: true));
                 }
             }
         }
